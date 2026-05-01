@@ -1,706 +1,613 @@
 """
-================================================================================
-CuidaFamília - Agente de IA para Cuidados Familiares v2.0
-================================================================================
-Versão: 2.0 (Profissional Completa)
+CuidaFamília - Agente de IA Concierge de Cuidado
+Versão: 2.0 (Arquitetura Cognitiva com Memória Consolidada)
 Data: 2026-05-01
-Padrão: MIT/Harvard/Oxford
-Descrição: Sistema operacional de memória familiar com engenharia cognitiva
-
-ARQUITETURA:
-- Camada 1: Melhorias Rápidas (inverter ordem, aumentar limite, timestamps)
-- Camada 2: Memória Consolidada (family_memory, funções de leitura/escrita)
-- Camada 3: Duplo Ciclo de IA (extração + resposta, retorno de tools)
-- Camada 4: Embeddings (busca semântica, continuidade clínico-emocional)
-
-FLUXO:
-1. Registrar mensagem + buscar contexto
-2. Primeira inferência: cérebro analítico (extração)
-3. Executar tools + atualizar memória
-4. Segunda inferência: cérebro conversacional (resposta)
-5. Enviar resposta ao usuário
-
-================================================================================
 """
 
 import os
-import logging
 import json
+import logging
 from datetime import datetime
-from typing import Optional, Dict, List, Any
+
+import requests
 from fastapi import FastAPI, Request, Response
 from supabase import create_client, Client
-import requests
 from twilio.twiml.messaging_response import MessagingResponse
-import re
 
 # ============================================================================
-# CONFIGURAÇÃO DE LOGS
+# LOGGING
 # ============================================================================
 
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format="%(asctime)s - %(levelname)s - %(message)s",
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("CuidaFamilia")
 
 # ============================================================================
-# INICIALIZAÇÃO
+# CONFIGURAÇÃO BÁSICA
 # ============================================================================
 
-app = FastAPI()
+app = FastAPI(title="CuidaFamília API", version="2.0")
 
-# Variáveis de ambiente
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini")
 
-# Cliente Supabase
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+
 # ============================================================================
-# CLASSE: CuidaFamiliaAgent
+# TOOLS (FUNCTION CALLING)
 # ============================================================================
 
-class CuidaFamiliaAgent:
-    """
-    Agente de IA para cuidados familiares com engenharia cognitiva.
-    Implementa as 4 camadas de arquitetura profissional.
-    """
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "save_patient_info",
+            "description": "Salva ou atualiza informações do paciente idoso no banco de dados.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "patient_name": {"type": "string"},
+                    "birthdate": {"type": "string"},
+                    "gender": {"type": "string", "enum": ["M", "F", "Outro"]},
+                    "medications": {"type": "string"},
+                    "health_condition": {"type": "string"},
+                    "doctor_name": {"type": "string"},
+                    "doctor_phone": {"type": "string"},
+                },
+                "required": ["patient_name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "save_interlocutor_info",
+            "description": "Salva o nome do principal interlocutor da família.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "interlocutor_name": {"type": "string"},
+                },
+                "required": ["interlocutor_name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "schedule_event",
+            "description": "Agenda um evento, consulta, medicação ou lembrete.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "event_date": {"type": "string"},
+                    "event_time": {"type": "string"},
+                    "event_type": {
+                        "type": "string",
+                        "enum": ["consulta", "medicação", "exame", "compromisso", "lembrete", "outro"],
+                    },
+                    "description": {"type": "string"},
+                },
+                "required": ["title", "event_date", "event_type"],
+            },
+        },
+    },
+]
 
-    def __init__(self):
-        self.model = "gpt-4o-mini"
-        self.openrouter_url = "https://openrouter.ai/api/v1/chat/completions"
-        logger.info("✓ CuidaFamiliaAgent inicializado")
+# ============================================================================
+# SUPABASE HELPERS
+# ============================================================================
 
-    # ========================================================================
-    # CAMADA 1: MELHORIAS RÁPIDAS
-    # ========================================================================
 
-    async def normalize_whatsapp_number(self, phone: str) -> str:
-        """
-        Normaliza número WhatsApp para formato padrão.
-        Remove espaços, hífens, parênteses, prefixo 'whatsapp:'. Garante que começa com +.
-        """
-        # Remove prefixo 'whatsapp:' se existir
-        if phone.startswith('whatsapp:'):
-            phone = phone.replace('whatsapp:', '', 1)
-        
-        # Remove caracteres especiais
-        normalized = re.sub(r'[\s\-\(\)]', '', phone)
-        
-        # Garante que começa com +
-        if not normalized.startswith('+'):
-            normalized = '+' + normalized
-        
-        logger.info(f"[NORMALIZAÇÃO] {phone} → {normalized}")
-        return normalized
+async def get_family_by_whatsapp(whatsapp_number: str):
+    try:
+        res = supabase.table("families").select("*").eq("main_whatsapp", whatsapp_number).execute()
+        return res.data[0] if res.data else None
+    except Exception as e:
+        logger.error(f"Erro ao buscar família: {e}")
+        return None
 
-    async def get_conversation_history(
-        self, 
-        family_id: int, 
-        limit: int = 30  # CAMADA 1: Aumentado de 10 para 30
-    ) -> List[Dict]:
-        """
-        Busca histórico de conversa com limite aumentado.
-        CAMADA 1: Aumentar limite para 30 mensagens.
-        """
-        try:
-            response = supabase.table("conversation_history").select(
-                "sender_type, sender_name, message_text, created_at"
-            ).eq("family_id", family_id).order(
-                "created_at", desc=True
-            ).limit(limit).execute()
-            
-            # Inverter para ordem cronológica (mais antigo primeiro)
-            history = list(reversed(response.data))
-            logger.info(f"[HISTÓRICO] {len(history)} mensagens recuperadas para família {family_id}")
-            return history
-        except Exception as e:
-            logger.error(f"[ERRO] Falha ao buscar histórico: {e}")
-            return []
 
-    async def ensure_created_at_default(self):
-        """
-        CAMADA 1: Garantir que created_at tem DEFAULT NOW().
-        Executa uma vez na inicialização.
-        """
-        try:
-            # Verificar se a coluna tem default
-            logger.info("[VERIFICAÇÃO] Garantindo que created_at tem DEFAULT NOW()")
-            # O Supabase já tem isso configurado no script SQL
-            logger.info("[✓] created_at com DEFAULT NOW() confirmado")
-        except Exception as e:
-            logger.warning(f"[AVISO] Não foi possível verificar created_at: {e}")
+async def get_patient_by_family_id(family_id: int):
+    try:
+        res = supabase.table("patients").select("*").eq("family_id", family_id).execute()
+        return res.data[0] if res.data else None
+    except Exception as e:
+        logger.error(f"Erro ao buscar paciente: {e}")
+        return None
 
-    # ========================================================================
-    # CAMADA 2: MEMÓRIA CONSOLIDADA
-    # ========================================================================
 
-    async def get_family_memory(self, family_id: int) -> Optional[Dict]:
-        """
-        CAMADA 2: Busca memória consolidada da família.
-        Retorna o snapshot cognitivo (summary, emotional_context, etc).
-        """
-        try:
-            response = supabase.table("family_memory").select(
-                "id, summary, emotional_context, care_routines, risk_notes, updated_at"
-            ).eq("family_id", family_id).order(
-                "updated_at", desc=True
-            ).limit(1).execute()
-            
-            if response.data:
-                memory = response.data[0]
-                logger.info(f"[MEMÓRIA] Snapshot cognitivo recuperado para família {family_id}")
-                return memory
-            else:
-                logger.warning(f"[MEMÓRIA] Nenhum snapshot encontrado para família {family_id}")
-                return None
-        except Exception as e:
-            logger.error(f"[ERRO] Falha ao buscar memória: {e}")
-            return None
+async def get_conversation_history(family_id: int, limit: int = 30):
+    try:
+        res = (
+            supabase.table("conversation_history")
+            .select("sender_type, sender_name, message_text, created_at")
+            .eq("family_id", family_id)
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        return list(reversed(res.data)) if res.data else []
+    except Exception as e:
+        logger.error(f"Erro ao buscar histórico: {e}")
+        return []
 
-    async def save_family_memory(
-        self,
-        family_id: int,
-        summary: str,
-        emotional_context: str,
-        care_routines: str,
-        risk_notes: str
-    ) -> bool:
-        """
-        CAMADA 2: Salva/atualiza memória consolidada da família.
-        Atualiza o snapshot cognitivo após cada conversa.
-        """
-        try:
-            # Buscar se já existe memória
-            existing = await self.get_family_memory(family_id)
-            
-            memory_data = {
-                "family_id": family_id,
-                "summary": summary,
-                "emotional_context": emotional_context,
-                "care_routines": care_routines,
-                "risk_notes": risk_notes,
-                "updated_at": datetime.utcnow().isoformat()
-            }
-            
-            if existing:
-                # Atualizar
-                supabase.table("family_memory").update(memory_data).eq(
-                    "id", existing["id"]
-                ).execute()
-                logger.info(f"[MEMÓRIA] Snapshot atualizado para família {family_id}")
-            else:
-                # Inserir
-                supabase.table("family_memory").insert(memory_data).execute()
-                logger.info(f"[MEMÓRIA] Novo snapshot criado para família {family_id}")
-            
-            return True
-        except Exception as e:
-            logger.error(f"[ERRO] Falha ao salvar memória: {e}")
-            return False
 
-    def format_family_memory_for_context(self, memory: Optional[Dict]) -> str:
-        """
-        CAMADA 2: Formata memória consolidada para incluir no prompt.
-        Transforma dados estruturados em texto legível.
-        """
-        if not memory:
-            return "MEMÓRIA CONSOLIDADA: Nenhuma memória disponível ainda."
-        
-        context = f"""
-MEMÓRIA CONSOLIDADA DA FAMÍLIA:
+async def save_conversation_message(family_id: int, sender_type: str, sender_name: str, message_text: str):
+    try:
+        data = {
+            "family_id": family_id,
+            "sender_type": sender_type,
+            "sender_name": sender_name,
+            "message_text": message_text,
+        }
+        supabase.table("conversation_history").insert(data).execute()
+    except Exception as e:
+        logger.error(f"Erro ao salvar mensagem: {e}")
 
-📋 RESUMO FACTUAL:
-{memory.get('summary', 'N/A')}
 
-💭 CONTEXTO EMOCIONAL:
-{memory.get('emotional_context', 'N/A')}
+async def log_action(family_id: int, log_type: str, message: str, created_by: str = "IA", metadata: dict | None = None):
+    try:
+        data = {
+            "family_id": family_id,
+            "log_type": log_type,
+            "message": message,
+            "created_by": created_by,
+            "metadata": metadata,
+        }
+        supabase.table("family_logs").insert(data).execute()
+    except Exception as e:
+        logger.error(f"Erro ao registrar log: {e}")
 
-🏥 ROTINAS DE CUIDADO:
-{memory.get('care_routines', 'N/A')}
 
-⚠️ OBSERVAÇÕES DE RISCO:
-{memory.get('risk_notes', 'N/A')}
+async def save_patient_info_db(
+    family_id: int,
+    patient_name: str,
+    birthdate: str | None = None,
+    gender: str | None = None,
+    medications: str | None = None,
+    health_condition: str | None = None,
+    doctor_name: str | None = None,
+    doctor_phone: str | None = None,
+):
+    try:
+        patient_data = {
+            "family_id": family_id,
+            "patient_name": patient_name,
+            "birthdate": birthdate,
+            "gender": gender,
+            "medications": medications,
+            "health_condition": health_condition,
+            "doctor_name": doctor_name,
+            "doctor_phone": doctor_phone,
+        }
+        patient_data = {k: v for k, v in patient_data.items() if v is not None}
+        existing = await get_patient_by_family_id(family_id)
+        if existing:
+            supabase.table("patients").update(patient_data).eq("family_id", family_id).execute()
+        else:
+            supabase.table("patients").insert(patient_data).execute()
+    except Exception as e:
+        logger.error(f"Erro ao salvar paciente: {e}")
 
-Última atualização: {memory.get('updated_at', 'N/A')}
-"""
-        return context
 
-    # ========================================================================
-    # CAMADA 3: DUPLO CICLO DE IA
-    # ========================================================================
+async def save_interlocutor_info_db(family_id: int, interlocutor_name: str):
+    try:
+        supabase.table("families").update({"main_interlocutor_name": interlocutor_name}).eq("id", family_id).execute()
+    except Exception as e:
+        logger.error(f"Erro ao salvar interlocutor: {e}")
 
-    async def first_inference_extraction(
-        self,
-        family_id: int,
-        incoming_msg: str,
-        history: List[Dict],
-        family_memory: Optional[Dict],
-        patient_info: Dict
-    ) -> Dict:
-        """
-        CAMADA 3: Primeira inferência - Cérebro Analítico.
-        Extrai fatos, eventos, necessidades de atualização.
-        Retorna JSON estruturado com decisões de tools.
-        """
-        
-        history_text = self._format_history_for_prompt(history)
-        memory_context = self.format_family_memory_for_context(family_memory)
-        
-        extraction_prompt = f"""
-Você é um analisador cognitivo especializado em cuidados familiares.
 
-MEMÓRIA CONSOLIDADA ATUAL:
+async def schedule_event_db(
+    family_id: int,
+    title: str,
+    event_date: str,
+    event_time: str | None = None,
+    event_type: str = "outro",
+    description: str | None = None,
+):
+    try:
+        data = {
+            "family_id": family_id,
+            "title": title,
+            "event_date": event_date,
+            "event_time": event_time,
+            "event_type": event_type,
+            "description": description,
+            "status": "ativo",
+        }
+        supabase.table("family_agenda").insert(data).execute()
+    except Exception as e:
+        logger.error(f"Erro ao agendar evento: {e}")
+
+
+async def get_family_memory(family_id: int):
+    try:
+        res = (
+            supabase.table("family_memory")
+            .select("*")
+            .eq("family_id", family_id)
+            .order("updated_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        return res.data[0] if res.data else None
+    except Exception as e:
+        logger.error(f"Erro ao buscar memória da família: {e}")
+        return None
+
+
+async def upsert_family_memory(
+    family_id: int,
+    summary: str | None,
+    emotional_context: str | None,
+    care_routines: str | None,
+    risk_notes: str | None,
+):
+    try:
+        data = {
+            "family_id": family_id,
+            "summary": summary or "",
+            "emotional_context": emotional_context or "",
+            "care_routines": care_routines or "",
+            "risk_notes": risk_notes or "",
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+        existing = await get_family_memory(family_id)
+        if existing:
+            supabase.table("family_memory").update(data).eq("id", existing["id"]).execute()
+        else:
+            supabase.table("family_memory").insert(data).execute()
+    except Exception as e:
+        logger.error(f"Erro ao atualizar memória da família: {e}")
+
+# ============================================================================
+# CONTEXTO PARA PROMPTS
+# ============================================================================
+
+
+def format_conversation_history_for_context(history: list) -> str:
+    if not history:
+        return "Nenhuma conversa anterior relevante."
+    lines = []
+    for msg in history:
+        sender = msg.get("sender_name") or msg.get("sender_type", "Desconhecido")
+        text = msg.get("message_text", "")
+        lines.append(f"- {sender}: {text}")
+    return "Histórico recente de mensagens:\n" + "\n".join(lines)
+
+
+def format_patient_info_for_context(patient: dict | None) -> str:
+    if not patient:
+        return "Nenhuma informação de paciente cadastrada ainda."
+    parts = [f"- Nome: {patient.get('patient_name', 'N/A')}"]
+    if patient.get("birthdate"):
+        parts.append(f"- Data de nascimento: {patient['birthdate']}")
+    if patient.get("medications"):
+        parts.append(f"- Medicamentos: {patient['medications']}")
+    if patient.get("health_condition"):
+        parts.append(f"- Condição de saúde: {patient['health_condition']}")
+    if patient.get("doctor_name"):
+        parts.append(f"- Médico responsável: {patient['doctor_name']}")
+    return "Informações do paciente:\n" + "\n".join(parts)
+
+
+def format_family_memory_for_context(memory: dict | None) -> str:
+    if not memory:
+        return "Nenhuma memória consolidada registrada ainda."
+    parts = []
+    if memory.get("summary"):
+        parts.append(f"Resumo factual: {memory['summary']}")
+    if memory.get("care_routines"):
+        parts.append(f"Rotinas de cuidado: {memory['care_routines']}")
+    if memory.get("risk_notes"):
+        parts.append(f"Notas de risco: {memory['risk_notes']}")
+    if memory.get("emotional_context"):
+        parts.append(f"Contexto emocional: {memory['emotional_context']}")
+    return "Memória consolidada da família:\n" + "\n".join(parts)
+
+# ============================================================================
+# OPENROUTER HELPER
+# ============================================================================
+
+
+def call_openrouter(payload: dict) -> dict:
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    resp = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=40)
+    resp.raise_for_status()
+    return resp.json()
+
+# ============================================================================
+# HEALTH CHECK
+# ============================================================================
+
+
+@app.get("/")
+async def root():
+    return {
+        "status": "CuidaFamília Online",
+        "version": "2.0",
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+
+# ============================================================================
+# WEBHOOK WHATSAPP (ORQUESTRAÇÃO COGNITIVA)
+# ============================================================================
+
+
+@app.post("/whatsapp")
+async def whatsapp_webhook(request: Request):
+    twilio_resp = MessagingResponse()
+
+    try:
+        form = await request.form()
+        incoming_msg = (form.get("Body") or "").strip()
+        sender_number = (form.get("From") or "").replace("whatsapp:", "")
+
+        logger.info(f"[NOVA MENSAGEM] {sender_number}: {incoming_msg}")
+
+        # --------------------------------------------------------------------
+        # 1. Identificar família
+        # --------------------------------------------------------------------
+        family = await get_family_by_whatsapp(sender_number)
+        if not family:
+            msg = (
+                "Olá! Não consegui identificar sua família no CuidaFamília.\n"
+                "Verifique se seu número está cadastrado ou fale com o suporte."
+            )
+            twilio_resp.message(msg)
+            return Response(content=str(twilio_resp), media_type="application/xml")
+
+        family_id = family["id"]
+        family_name = family.get("family_name", "Família")
+        main_interlocutor = family.get("main_interlocutor_name") or "Responsável"
+
+        # --------------------------------------------------------------------
+        # 2. Registrar mensagem do usuário imediatamente
+        # --------------------------------------------------------------------
+        await save_conversation_message(
+            family_id=family_id,
+            sender_type="user",
+            sender_name=main_interlocutor,
+            message_text=incoming_msg,
+        )
+
+        # --------------------------------------------------------------------
+        # 3. Buscar contexto: paciente, memória consolidada, histórico
+        # --------------------------------------------------------------------
+        patient = await get_patient_by_family_id(family_id)
+        patient_name = patient.get("patient_name", "paciente") if patient else "paciente"
+
+        family_memory = await get_family_memory(family_id)
+        history = await get_conversation_history(family_id, limit=30)
+
+        patient_context = format_patient_info_for_context(patient)
+        memory_context = format_family_memory_for_context(family_memory)
+        history_context = format_conversation_history_for_context(history)
+
+        # --------------------------------------------------------------------
+        # 4. PRIMEIRO CICLO: ANÁLISE + TOOLS + ATUALIZAÇÃO DE MEMÓRIA
+        # --------------------------------------------------------------------
+        system_analytical = f"""
+Você é o módulo ANALÍTICO do CuidaFamília, um Concierge de Cuidado para a família {family_name} e o paciente {patient_name}.
+
+Seu papel neste ciclo NÃO é conversar com o usuário, e sim:
+- analisar a nova mensagem;
+- decidir se deve chamar ferramentas (functions) para:
+  - salvar informações do paciente;
+  - salvar interlocutor;
+  - agendar eventos;
+- sugerir atualização da MEMÓRIA CONSOLIDADA da família.
+
+Contexto disponível:
+
+{patient_context}
+
 {memory_context}
 
-HISTÓRICO RECENTE:
-{history_text}
+{history_context}
 
-INFORMAÇÕES DO PACIENTE:
-{json.dumps(patient_info, ensure_ascii=False, indent=2)}
+GUARDRAILS CLÍNICOS (NUNCA viole):
+- Não faça diagnósticos.
+- Não recomende, altere ou confirme medicações.
+- Não dê conselhos médicos específicos.
+- Em caso de emergência (dor no peito, falta de ar, desmaio, etc.), a camada conversacional avisará para ligar 192.
 
-NOVA MENSAGEM DO USUÁRIO:
-"{incoming_msg}"
+FORMATO DA SUA RESPOSTA:
+1) Você pode chamar tools quantas vezes forem necessárias.
+2) No campo 'content', você DEVE retornar um JSON com a seguinte estrutura:
 
-TAREFA: Analise a mensagem e retorne um JSON com:
 {{
-  "extracted_facts": ["fato1", "fato2"],
-  "emotional_signals": ["sinal1", "sinal2"],
-  "routine_changes": ["mudança1"],
-  "risk_alerts": ["alerta1"],
-  "memory_update_needed": true/false,
-  "tools_to_call": [
-    {{"tool": "save_patient_info", "params": {{...}}}},
-    {{"tool": "schedule_event", "params": {{...}}}}
-  ],
-  "summary": "resumo do que foi detectado"
+  "memory_update": {{
+    "summary": "string (ou null)",
+    "emotional_context": "string (ou null)",
+    "care_routines": "string (ou null)",
+    "risk_notes": "string (ou null)"
+  }}
 }}
 
-Seja preciso e estruturado. Retorne APENAS JSON válido.
+Se não houver nada para atualizar, use null nos campos.
+Não escreva texto fora de JSON no 'content'.
 """
-        
-        try:
-            response = requests.post(
-                self.openrouter_url,
-                headers={
-                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                    "HTTP-Referer": "https://cuidafamilia.onrender.com",
-                    "X-Title": "CuidaFamília"
-                },
-                json={
-                    "model": self.model,
-                    "messages": [{"role": "user", "content": extraction_prompt}],
-                    "temperature": 0.3  # Mais determinístico para extração
-                }
-            )
-            
-            if response.status_code == 200:
-                content = response.json()["choices"][0]["message"]["content"]
-                # Extrair JSON da resposta
-                extraction_result = json.loads(content)
-                logger.info(f"[EXTRAÇÃO] Análise concluída: {extraction_result['summary']}")
-                return extraction_result
-            else:
-                logger.error(f"[ERRO] OpenRouter retornou {response.status_code}")
-                return {"error": "Falha na extração"}
-        except Exception as e:
-            logger.error(f"[ERRO] Falha na primeira inferência: {e}")
-            return {"error": str(e)}
 
-    async def second_inference_response(
-        self,
-        family_id: int,
-        incoming_msg: str,
-        history: List[Dict],
-        family_memory: Optional[Dict],
-        patient_info: Dict,
-        extraction_result: Dict,
-        tool_results: Dict
-    ) -> str:
-        """
-        CAMADA 3: Segunda inferência - Cérebro Conversacional.
-        Gera resposta ao usuário usando memória consolidada e resultados de tools.
-        """
-        
-        history_text = self._format_history_for_prompt(history[-10:])  # Últimas 10
-        memory_context = self.format_family_memory_for_context(family_memory)
-        
-        response_prompt = f"""
-Você é a CuidaFamília, uma secretária executiva especializada em cuidados familiares.
+        analytical_messages = [
+            {"role": "system", "content": system_analytical},
+            {"role": "user", "content": incoming_msg},
+        ]
+
+        analytical_payload = {
+            "model": OPENROUTER_MODEL,
+            "messages": analytical_messages,
+            "tools": TOOLS,
+            "tool_choice": "auto",
+        }
+
+        logger.info("[IA] Iniciando ciclo analítico com tools...")
+        analytical_response = call_openrouter(analytical_payload)
+        analytical_choice = analytical_response.get("choices", [{}])[0]
+        analytical_msg = analytical_choice.get("message", {})
+
+        # --------------------------------------------------------------------
+        # 4.1 Executar tools chamadas pelo modelo
+        # --------------------------------------------------------------------
+        if analytical_msg.get("tool_calls"):
+            for tool_call in analytical_msg["tool_calls"]:
+                fn_name = tool_call["function"]["name"]
+                args = json.loads(tool_call["function"]["arguments"] or "{}")
+                logger.info(f"[FUNCTION CALL] {fn_name} | {args}")
+
+                if fn_name == "save_patient_info":
+                    await save_patient_info_db(family_id=family_id, **args)
+                    await log_action(
+                        family_id,
+                        "update",
+                        f"Informações do paciente atualizadas: {args.get('patient_name')}",
+                        metadata=args,
+                    )
+
+                elif fn_name == "save_interlocutor_info":
+                    await save_interlocutor_info_db(family_id, args.get("interlocutor_name", ""))
+                    await log_action(
+                        family_id,
+                        "update",
+                        f"Interlocutor principal registrado: {args.get('interlocutor_name')}",
+                        metadata=args,
+                    )
+
+                elif fn_name == "schedule_event":
+                    await schedule_event_db(family_id=family_id, **args)
+                    await log_action(
+                        family_id,
+                        "update",
+                        f"Evento agendado: {args.get('title')} em {args.get('event_date')}",
+                        metadata=args,
+                    )
+
+        # --------------------------------------------------------------------
+        # 4.2 Atualizar memória consolidada com base no JSON retornado
+        # --------------------------------------------------------------------
+        memory_update = None
+        if analytical_msg.get("content"):
+            try:
+                parsed = json.loads(analytical_msg["content"])
+                memory_update = parsed.get("memory_update")
+            except Exception as e:
+                logger.warning(f"Falha ao parsear JSON de memory_update: {e}")
+
+        if memory_update:
+            await upsert_family_memory(
+                family_id=family_id,
+                summary=memory_update.get("summary"),
+                emotional_context=memory_update.get("emotional_context"),
+                care_routines=memory_update.get("care_routines"),
+                risk_notes=memory_update.get("risk_notes"),
+            )
+            logger.info("[MEMÓRIA] Memória consolidada atualizada pelo ciclo analítico.")
+
+        # Recarregar memória após possível atualização
+        family_memory = await get_family_memory(family_id)
+        memory_context = format_family_memory_for_context(family_memory)
+
+        # --------------------------------------------------------------------
+        # 5. SEGUNDO CICLO: RESPOSTA CONVERSACIONAL
+        # --------------------------------------------------------------------
+        system_conversational = f"""
+Você é o CuidaFamília, um Concierge de Cuidado e Secretária Executiva Familiar.
+
+Você atende a família {family_name}, cuidando de {patient_name}.
+
+Seu papel:
+- responder de forma empática, organizada e profissional;
+- ajudar a organizar informações, registrar fatos, agendar compromissos e lembrar rotinas;
+- usar a MEMÓRIA CONSOLIDADA e o histórico para manter continuidade.
 
 MEMÓRIA CONSOLIDADA:
 {memory_context}
 
-HISTÓRICO RECENTE (últimas mensagens):
-{history_text}
-
 INFORMAÇÕES DO PACIENTE:
-{json.dumps(patient_info, ensure_ascii=False, indent=2)}
+{patient_context}
 
-ANÁLISE DA MENSAGEM ANTERIOR:
-{json.dumps(extraction_result, ensure_ascii=False, indent=2)}
-
-RESULTADOS DAS AÇÕES EXECUTADAS:
-{json.dumps(tool_results, ensure_ascii=False, indent=2)}
-
-MENSAGEM DO USUÁRIO:
-"{incoming_msg}"
+HISTÓRICO RECENTE:
+{history_context}
 
 GUARDRAILS CRÍTICOS:
-- NUNCA forneça diagnósticos médicos
-- NUNCA recomende alteração de medicações
-- NUNCA dê conselhos médicos diretos
-- Se detectar emergência (queda, dor no peito, etc), redirecione para SAMU 192
-- Sempre redirecione questões médicas para o médico responsável
+- NUNCA forneça diagnósticos médicos.
+- NUNCA recomende, altere ou ajuste medicações.
+- NUNCA diga se um exame está normal ou anormal.
+- Sempre que a mensagem indicar emergência (dor no peito, falta de ar, desmaio, etc.), diga:
+  "EMERGÊNCIA DETECTADA! Ligue para o SAMU (192) ou procure o pronto-socorro mais próximo AGORA!"
+- Foque em organização, logística, comunicação com o médico e apoio emocional leve.
 
-TAREFA: Responda ao usuário de forma:
-1. Empática e organizada
-2. Usando a memória consolidada como contexto
-3. Confirmando ações executadas
-4. Proativa em sugerir próximos passos
-5. Profissional e discreta
-
-Responda em português brasileiro. Seja concisa mas completa.
+Estilo:
+- linguagem simples, clara, respeitosa;
+- respostas objetivas, mas acolhedoras;
+- ofereça ajuda prática (ex: registrar, agendar, lembrar).
 """
-        
-        try:
-            response = requests.post(
-                self.openrouter_url,
-                headers={
-                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                    "HTTP-Referer": "https://cuidafamilia.onrender.com",
-                    "X-Title": "CuidaFamília"
-                },
-                json={
-                    "model": self.model,
-                    "messages": [{"role": "user", "content": response_prompt}],
-                    "temperature": 0.7  # Mais criativo para resposta
-                }
+
+        conversational_messages = [
+            {"role": "system", "content": system_conversational},
+            {"role": "user", "content": incoming_msg},
+        ]
+
+        conversational_payload = {
+            "model": OPENROUTER_MODEL,
+            "messages": conversational_messages,
+        }
+
+        logger.info("[IA] Iniciando ciclo conversacional...")
+        conv_response = call_openrouter(conversational_payload)
+        conv_choice = conv_response.get("choices", [{}])[0]
+        ai_text = conv_choice.get("message", {}).get("content", "").strip()
+
+        if not ai_text:
+            ai_text = (
+                "Entendi sua mensagem e registrei as informações. "
+                "Como posso ajudar você a organizar os cuidados a partir disso?"
             )
-            
-            if response.status_code == 200:
-                reply = response.json()["choices"][0]["message"]["content"]
-                logger.info("[RESPOSTA] Gerada com sucesso")
-                return reply
-            else:
-                logger.error(f"[ERRO] OpenRouter retornou {response.status_code}")
-                return "Desculpe, tive um problema ao processar sua mensagem. Tente novamente."
-        except Exception as e:
-            logger.error(f"[ERRO] Falha na segunda inferência: {e}")
-            return "Desculpe, tive um problema ao processar sua mensagem. Tente novamente."
 
-    # ========================================================================
-    # CAMADA 4: EMBEDDINGS (VERSÃO FUTURA)
-    # ========================================================================
+        twilio_resp.message(ai_text)
 
-    async def semantic_search_similar_events(
-        self,
-        family_id: int,
-        query: str,
-        limit: int = 5
-    ) -> List[Dict]:
-        """
-        CAMADA 4: Busca semântica de eventos similares.
-        Encontra continuidade clínico-emocional.
-        
-        NOTA: Implementação futura com embeddings.
-        Por enquanto, retorna busca textual simples.
-        """
-        try:
-            # Busca simples por texto (versão MVP)
-            response = supabase.table("conversation_history").select(
-                "sender_name, message_text, created_at"
-            ).eq("family_id", family_id).ilike(
-                "message_text", f"%{query}%"
-            ).order("created_at", desc=True).limit(limit).execute()
-            
-            logger.info(f"[BUSCA SEMÂNTICA] {len(response.data)} eventos similares encontrados")
-            return response.data
-        except Exception as e:
-            logger.error(f"[ERRO] Falha na busca semântica: {e}")
-            return []
-
-    # ========================================================================
-    # FUNÇÕES AUXILIARES
-    # ========================================================================
-
-    def _format_history_for_prompt(self, history: List[Dict]) -> str:
-        """Formata histórico para incluir no prompt."""
-        if not history:
-            return "Nenhum histórico disponível ainda."
-        
-        formatted = ""
-        for msg in history:
-            sender = msg.get("sender_name", "Desconhecido")
-            text = msg.get("message_text", "")
-            formatted += f"• {sender}: {text}\n"
-        
-        return formatted
-
-    async def get_family_by_whatsapp(self, whatsapp: str) -> Optional[Dict]:
-        """Busca família pelo número WhatsApp."""
-        try:
-            response = supabase.table("families").select("*").eq(
-                "main_whatsapp", whatsapp
-            ).execute()
-            
-            if response.data:
-                logger.info(f"[FAMÍLIA] Encontrada: {response.data[0]['family_name']}")
-                return response.data[0]
-            else:
-                logger.warning(f"[FAMÍLIA] Não encontrada para {whatsapp}")
-                return None
-        except Exception as e:
-            logger.error(f"[ERRO] Falha ao buscar família: {e}")
-            return None
-
-    async def get_patient_info(self, family_id: int) -> Optional[Dict]:
-        """Busca informações do paciente."""
-        try:
-            response = supabase.table("patients").select("*").eq(
-                "family_id", family_id
-            ).limit(1).execute()
-            
-            if response.data:
-                logger.info(f"[PACIENTE] Informações recuperadas")
-                return response.data[0]
-            else:
-                logger.warning(f"[PACIENTE] Não encontrado para família {family_id}")
-                return None
-        except Exception as e:
-            logger.error(f"[ERRO] Falha ao buscar paciente: {e}")
-            return None
-
-    async def save_conversation_message(
-        self,
-        family_id: int,
-        sender_type: str,
-        sender_name: str,
-        message_text: str
-    ) -> bool:
-        """
-        CAMADA 1: Salva mensagem ANTES de buscar histórico.
-        Garante que a IA sempre vê a última mensagem.
-        """
-        try:
-            message_data = {
-                "family_id": family_id,
-                "sender_type": sender_type,
-                "sender_name": sender_name,
-                "message_text": message_text,
-                "created_at": datetime.utcnow().isoformat()
-            }
-            
-            supabase.table("conversation_history").insert(message_data).execute()
-            logger.info(f"[MENSAGEM] Salva: {sender_type} - {message_text[:50]}")
-            return True
-        except Exception as e:
-            logger.error(f"[ERRO] Falha ao salvar mensagem: {e}")
-            return False
-
-    async def save_family_log(
-        self,
-        family_id: int,
-        action_type: str,
-        description: str,
-        metadata: Dict = None
-    ) -> bool:
-        """Salva log de auditoria."""
-        try:
-            log_data = {
-                "family_id": family_id,
-                "action_type": action_type,
-                "description": description,
-                "metadata": metadata or {},
-                "created_at": datetime.utcnow().isoformat()
-            }
-            
-            supabase.table("family_logs").insert(log_data).execute()
-            logger.info(f"[LOG] {action_type}: {description}")
-            return True
-        except Exception as e:
-            logger.error(f"[ERRO] Falha ao salvar log: {e}")
-            return False
-
-# ============================================================================
-# INSTÂNCIA GLOBAL DO AGENTE
-# ============================================================================
-
-agent = CuidaFamiliaAgent()
-
-# ============================================================================
-# ROTAS FASTAPI
-# ============================================================================
-
-@app.get("/")
-async def health_check():
-    """Health check endpoint."""
-    return {
-        "status": "online",
-        "version": "2.0",
-        "architecture": "Harvard/MIT/Oxford",
-        "layers": ["Melhorias Rápidas", "Memória Consolidada", "Duplo Ciclo", "Embeddings"]
-    }
-
-@app.post("/whatsapp")
-async def whatsapp_webhook(request: Request):
-    """
-    CAMADA 3: Webhook do Twilio com duplo ciclo de IA.
-    
-    Fluxo:
-    1. Registrar mensagem + buscar contexto
-    2. Primeira inferência (extração)
-    3. Executar tools
-    4. Segunda inferência (resposta)
-    5. Enviar resposta
-    """
-    
-    try:
-        form_data = await request.form()
-        incoming_msg = form_data.get("Body", "").strip()
-        from_number = form_data.get("From", "").strip()
-        
-        # Normalizar número
-        from_number = await agent.normalize_whatsapp_number(from_number)
-        logger.info(f"[TWILIO] Mensagem de {from_number}: {incoming_msg}")
-        
-        # Buscar família
-        family = await agent.get_family_by_whatsapp(from_number)
-        if not family:
-            logger.warning(f"[ERRO] Família não encontrada para {from_number}")
-            response = MessagingResponse()
-            response.message("Olá! Não consegui identificar sua família no sistema CuidaFamília. Por favor, verifique se seu número WhatsApp está cadastrado corretamente.")
-            return Response(content=str(response), media_type="application/xml")
-        
-        family_id = family["id"]
-        main_interlocutor = family.get("main_interlocutor_name", "Usuário")
-        
-        # ====================================================================
-        # PASSO 1: REGISTRAR MENSAGEM + BUSCAR CONTEXTO
-        # ====================================================================
-        
-        # CAMADA 1: Salvar ANTES de buscar histórico
-        await agent.save_conversation_message(
-            family_id=family_id,
-            sender_type="user",
-            sender_name=main_interlocutor,
-            message_text=incoming_msg
-        )
-        
-        # Buscar contexto completo
-        history = await agent.get_conversation_history(family_id, limit=30)
-        family_memory = await agent.get_family_memory(family_id)
-        patient_info = await agent.get_patient_info(family_id) or {}
-        
-        # ====================================================================
-        # PASSO 2: PRIMEIRA INFERÊNCIA (CÉREBRO ANALÍTICO)
-        # ====================================================================
-        
-        extraction_result = await agent.first_inference_extraction(
-            family_id=family_id,
-            incoming_msg=incoming_msg,
-            history=history,
-            family_memory=family_memory,
-            patient_info=patient_info
-        )
-        
-        if "error" in extraction_result:
-            logger.error(f"[ERRO] Falha na extração: {extraction_result['error']}")
-            response = MessagingResponse()
-            response.message("Desculpe, tive um problema ao processar sua mensagem. Tente novamente.")
-            return Response(content=str(response), media_type="application/xml")
-        
-        # ====================================================================
-        # PASSO 3: EXECUTAR TOOLS + ATUALIZAR MEMÓRIA
-        # ====================================================================
-        
-        tool_results = {}
-        
-        # Executar tools conforme indicado pela extração
-        for tool_call in extraction_result.get("tools_to_call", []):
-            tool_name = tool_call.get("tool")
-            tool_params = tool_call.get("params", {})
-            
-            if tool_name == "save_patient_info":
-                # Salvar informações do paciente
-                logger.info(f"[TOOL] Executando save_patient_info")
-                tool_results["save_patient_info"] = "Informações do paciente salvas"
-            elif tool_name == "schedule_event":
-                # Agendar evento
-                logger.info(f"[TOOL] Executando schedule_event")
-                tool_results["schedule_event"] = "Evento agendado com sucesso"
-        
-        # Atualizar memória consolidada se necessário
-        if extraction_result.get("memory_update_needed"):
-            new_summary = extraction_result.get("summary", "")
-            await agent.save_family_memory(
-                family_id=family_id,
-                summary=new_summary,
-                emotional_context=extraction_result.get("emotional_signals", []),
-                care_routines=extraction_result.get("routine_changes", []),
-                risk_notes=extraction_result.get("risk_alerts", [])
-            )
-        
-        # ====================================================================
-        # PASSO 4: SEGUNDA INFERÊNCIA (CÉREBRO CONVERSACIONAL)
-        # ====================================================================
-        
-        reply = await agent.second_inference_response(
-            family_id=family_id,
-            incoming_msg=incoming_msg,
-            history=history,
-            family_memory=family_memory,
-            patient_info=patient_info,
-            extraction_result=extraction_result,
-            tool_results=tool_results
-        )
-        
-        # ====================================================================
-        # PASSO 5: SALVAR RESPOSTA + ENVIAR
-        # ====================================================================
-        
-        # Salvar resposta da IA
-        await agent.save_conversation_message(
+        await save_conversation_message(
             family_id=family_id,
             sender_type="ai",
             sender_name="CuidaFamília",
-            message_text=reply
+            message_text=ai_text,
         )
-        
-        # Registrar log
-        await agent.save_family_log(
-            family_id=family_id,
-            action_type="message_processed",
-            description=f"Mensagem processada com duplo ciclo de IA",
-            metadata={
-                "extraction_summary": extraction_result.get("summary"),
-                "tools_executed": len(extraction_result.get("tools_to_call", []))
-            }
+
+        await log_action(
+            family_id,
+            "note",
+            f"Mensagem processada: {incoming_msg[:120]}",
+            metadata={"sender": main_interlocutor},
         )
-        
-        # Enviar resposta via Twilio
-        response = MessagingResponse()
-        response.message(reply)
-        
-        logger.info(f"[RESPOSTA] Enviada com sucesso")
-        return Response(content=str(response), media_type="application/xml")
-        
+
+    except requests.exceptions.Timeout:
+        logger.error("Timeout ao conectar com OpenRouter")
+        twilio_resp.message(
+            "A inteligência artificial demorou para responder. "
+            "Por favor, tente novamente em alguns instantes."
+        )
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Erro na requisição ao OpenRouter: {e}")
+        twilio_resp.message(
+            "Tive um problema de comunicação com a inteligência artificial. "
+            "Tente novamente mais tarde."
+        )
     except Exception as e:
-        logger.error(f"[ERRO] Exceção não tratada: {e}")
-        response = MessagingResponse()
-        response.message("Desculpe, tive um problema ao processar sua mensagem. Tente novamente.")
-        return Response(content=str(response), media_type="application/xml")
+        logger.error(f"Erro crítico no webhook: {e}", exc_info=True)
+        twilio_resp.message(
+            "Ocorreu um erro inesperado no sistema CuidaFamília. "
+            "Nossa equipe foi notificada. Tente novamente em alguns minutos."
+        )
 
-# ============================================================================
-# INICIALIZAÇÃO
-# ============================================================================
-
-if __name__ == "__main__":
-    import uvicorn
-    logger.info("🚀 CuidaFamília v2.0 iniciando...")
-    logger.info("📊 Arquitetura: Harvard/MIT/Oxford")
-    logger.info("🧠 Camadas: 1-Rápidas, 2-Memória, 3-Duplo Ciclo, 4-Embeddings")
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    return Response(content=str(twilio_resp), media_type="application/xml")
