@@ -383,7 +383,14 @@ async def whatsapp_webhook(request: Request):
         # ====================================================================
         form_data = await request.form()
         incoming_msg = form_data.get("Body", "").strip()
-        sender_number = form_data.get("From", "").replace("whatsapp:", "")
+        sender_number = form_data.get("From", "").replace("whatsapp:", "").strip()
+        
+        # Normalizar número: remover espaços, hífens e garantir formato correto
+        sender_number = sender_number.replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
+        
+        # Se não começar com +, adicionar
+        if not sender_number.startswith("+"):
+            sender_number = "+" + sender_number
 
         logger.info(f"[NOVA MENSAGEM] De: {sender_number} | Texto: {incoming_msg}")
 
