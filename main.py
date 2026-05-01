@@ -81,8 +81,12 @@ class CuidaFamiliaAgent:
     async def normalize_whatsapp_number(self, phone: str) -> str:
         """
         Normaliza número WhatsApp para formato padrão.
-        Remove espaços, hífens, parênteses. Garante que começa com +.
+        Remove espaços, hífens, parênteses, prefixo 'whatsapp:'. Garante que começa com +.
         """
+        # Remove prefixo 'whatsapp:' se existir
+        if phone.startswith('whatsapp:'):
+            phone = phone.replace('whatsapp:', '', 1)
+        
         # Remove caracteres especiais
         normalized = re.sub(r'[\s\-\(\)]', '', phone)
         
