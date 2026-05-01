@@ -155,8 +155,27 @@ TOOLS = [
 async def get_family_by_whatsapp(whatsapp_number: str):
     """Busca uma família pelo número WhatsApp principal."""
     try:
-        response = supabase.table("families").select("*").eq("main_whatsapp", whatsapp_number).execute()
-        return response.data[0] if response.data else None
+        # Normalizar número: remover espaços, hífens, parênteses
+        normalized_number = whatsapp_number.strip().replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
+        
+        # Garantir que começa com +
+        if not normalized_number.startswith("+"):
+            normalized_number = "+" + normalized_number
+        
+        logger.info(f"[DEBUG] Buscando família com número: {normalized_number}")
+        
+        # Buscar com igualdade exata
+        response = supabase.table("families").select("*").eq("main_whatsapp", normalized_number).execute()
+        
+        if response.data:
+            logger.info(f"[DEBUG] Família encontrada: {response.data[0].get('family_name')}")
+            return response.data[0]
+        else:
+            # Se não encontrou, listar todas as famílias para debug
+            logger.warning(f"[DEBUG] Nenhuma família encontrada para {normalized_number}")
+            all_families = supabase.table("families").select("id, family_name, main_whatsapp").execute()
+            logger.warning(f"[DEBUG] Famílias no banco: {all_families.data}")
+            return None
     except Exception as e:
         logger.error(f"Erro ao buscar família por WhatsApp: {e}")
         return None
