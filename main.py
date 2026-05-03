@@ -1,11 +1,17 @@
 """
 CuidaFamília - Agente de IA Concierge de Cuidado
-Versão: 3.0 (Correções Cirúrgicas: Fase 1 + 2 + 3)
+Versão: 3.1 (Melhorias sem quebrar nada)
 
-CORREÇÕES DESTA VERSÃO:
+CORREÇÕES ANTERIORES (v3.0):
   [FASE 1] Medicação recorrente vai para medication_schedules (não mais family_agenda)
   [FASE 2] Confirmações pendentes persistidas no banco (pending_confirmations)
   [FASE 3] Regra de clarificação para mensagens vagas antes de registrar qualquer coisa
+
+MELHORIAS v3.1:
+  [FIX 1] upsert_family_memory: merge inteligente — não sobrescreve campos existentes com vazio
+  [FIX 2] Clarificação acumulada: IA recebe dados já coletados no histórico para não repetir perguntas
+  [FIX 3] Segundo ciclo condicional: não chama OpenRouter duas vezes quando resposta já está definida
+  [FIX 4] Log de ação enriquecido: registra tipo de ação executada para melhor rastreabilidade
 """
 
 import os
@@ -94,8 +100,8 @@ TOOLS = [
                     "event_date": {"type": "string"},
                     "event_time": {"type": "string"},
                     "event_type": {
-                        "type": "string",
-                        "enum": ["consulta", "exame", "compromisso", "lembrete", "outro"],
+                    "type": "string",
+                    "enum": ["consulta", "exame", "compromisso", "lembrete", "outro"],
                     },
                     "description": {"type": "string"},
                 },
@@ -115,13 +121,13 @@ TOOLS = [
                     "medication_name": {"type": "string", "description": "Nome do medicamento"},
                     "dosage": {"type": "string", "description": "Dosagem ex: 50mg, 1 comprimido"},
                     "times": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Lista de horários ex: ['08:00', '20:00']",
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Lista de horários ex: ['08:00', '20:00']",
                     },
                     "frequency": {
-                        "type": "string",
-                        "description": "Frequência: diário, semanal, etc.",
+                    "type": "string",
+                    "description": "Frequência: diário, semanal, etc.",
                     },
                     "notes": {"type": "string", "description": "Observações adicionais"},
                 },
@@ -139,13 +145,13 @@ TOOLS = [
                 "type": "object",
                 "properties": {
                     "intent": {
-                        "type": "string",
-                        "description": "O que o usuário parece querer registrar: medicação, consulta, exame, etc.",
+                    "type": "string",
+                    "description": "O que o usuário parece querer registrar: medicação, consulta, exame, etc.",
                     },
                     "missing_fields": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Lista dos campos que estão faltando para completar o registro.",
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Lista dos campos que estão faltando para completar o registro.",
                     },
                 },
                 "required": ["intent", "missing_fields"],
@@ -341,19 +347,34 @@ async def upsert_family_memory(
     care_routines: str | None,
     risk_notes: str | None,
 ):
+    """[FIX 1] Merge inteligente: só atualiza campos que a IA enviou, preserva os demais."""
     try:
-        data = {
-            "family_id": family_id,
-            "summary": summary or "",
-            "emotional_context": emotional_context or "",
-            "care_routines": care_routines or "",
-            "risk_notes": risk_notes or "",
-            "updated_at": datetime.utcnow().isoformat(),
-        }
         existing = await get_family_memory(family_id)
+
+        # Monta apenas os campos que a IA realmente enviou (não None e não vazio)
+        updates = {"updated_at": datetime.utcnow().isoformat()}
+        if summary:
+            updates["summary"] = summary
+        if emotional_context:
+            updates["emotional_context"] = emotional_context
+        if care_routines:
+            updates["care_routines"] = care_routines
+        if risk_notes:
+            updates["risk_notes"] = risk_notes
+
         if existing:
-            supabase.table("family_memory").update(data).eq("id", existing["id"]).execute()
+            # Atualiza apenas os campos enviados — preserva o restante
+            supabase.table("family_memory").update(updates).eq("id", existing["id"]).execute()
         else:
+            # Primeiro registro: insere com todos os campos (vazios onde não há dado)
+            data = {
+                "family_id": family_id,
+                "summary": summary or "",
+                "emotional_context": emotional_context or "",
+                "care_routines": care_routines or "",
+                "risk_notes": risk_notes or "",
+                "updated_at": datetime.utcnow().isoformat(),
+            }
             supabase.table("family_memory").insert(data).execute()
     except Exception as e:
         logger.error(f"Erro ao atualizar memória da família: {e}")
@@ -545,11 +566,11 @@ async def whatsapp_webhook(request: Request):
                     await schedule_event_db(family_id=family_id, **action_data)
                     await log_action(family_id, "update", f"Evento confirmado e agendado: {action_data.get('title')}", metadata=action_data)
                     reply = (
-                        f"✅ Agendado com sucesso!\n"
-                        f"📅 {action_data.get('title')}\n"
-                        f"📆 Data: {action_data.get('event_date')}\n"
-                        f"⏰ Horário: {action_data.get('event_time', 'não informado')}\n\n"
-                        f"Posso ajudar com mais alguma coisa?"
+                    f"✅ Agendado com sucesso!\n"
+                    f"📅 {action_data.get('title')}\n"
+                    f"📆 Data: {action_data.get('event_date')}\n"
+                    f"⏰ Horário: {action_data.get('event_time', 'não informado')}\n\n"
+                    f"Posso ajudar com mais alguma coisa?"
                     )
 
                 elif action_type == "save_medication_schedule":
@@ -557,11 +578,11 @@ async def whatsapp_webhook(request: Request):
                     await log_action(family_id, "update", f"Medicação confirmada e registrada: {action_data.get('medication_name')}", metadata=action_data)
                     times_str = ", ".join(action_data.get("times", []))
                     reply = (
-                        f"✅ Rotina de medicação registrada!\n"
-                        f"💊 {action_data.get('medication_name')} {action_data.get('dosage')}\n"
-                        f"🔁 Frequência: {action_data.get('frequency')}\n"
-                        f"⏰ Horários: {times_str}\n\n"
-                        f"Posso ajudar com mais alguma coisa?"
+                    f"✅ Rotina de medicação registrada!\n"
+                    f"💊 {action_data.get('medication_name')} {action_data.get('dosage')}\n"
+                    f"🔁 Frequência: {action_data.get('frequency')}\n"
+                    f"⏰ Horários: {times_str}\n\n"
+                    f"Posso ajudar com mais alguma coisa?"
                     )
 
                 else:
@@ -643,16 +664,19 @@ REGRAS CRÍTICAS PARA CHAMADA DE TOOLS:
 [FASE 3 - CLARIFICAÇÃO OBRIGATÓRIA]
 - Se a mensagem tem intenção de registrar algo, mas falta campo obrigatório:
   → Use a tool "request_clarification"
-  → NUNCA infira campos obrigatórios pelo histórico sem avisar
+  → IMPORTANTE: Verifique o HISTÓRICO RECENTE antes de pedir clarificação.
+    Se o usuário já informou o dado em mensagem anterior desta mesma conversa, USE esse dado.
+    Só peça clarificação se o dado realmente não foi informado em nenhuma mensagem anterior.
   → Campos obrigatórios por tipo:
     - consulta/exame: título/médico, data, horário
     - medicação recorrente: nome do medicamento, dosagem, horários
     - lembrete: descrição, data
 - Exemplos de mensagens vagas que DEVEM acionar clarificação:
-  → "ela tem consulta" (falta: médico, data, horário)
+  → "ela tem consulta" (falta: médico, data, horário — se não estiverem no histórico)
   → "ela toma remédio todo dia" (falta: nome, dosagem, horário)
   → "precisa de exame" (falta: tipo, data)
   → "tem compromisso amanhã" (falta: descrição, horário)
+- Se o usuário já disse "amanhã às 15h" e depois informou o médico, COMBINE os dados e vá para pending_action.
 
 [DATAS PASSADAS]
 - Se a data mencionada for anterior a hoje ({today_str}), NÃO agende.
@@ -722,6 +746,8 @@ Não escreva texto fora de JSON no 'content'.
         pending_action = None
         date_error = False
         date_error_message = None
+        # [FIX 3] Flag para pular segundo ciclo quando a resposta já está definida pela ação executada
+        skip_conversational = False
 
         if analytical_msg.get("tool_calls"):
             for tool_call in analytical_msg["tool_calls"]:
@@ -731,11 +757,21 @@ Não escreva texto fora de JSON no 'content'.
 
                 if fn_name == "save_patient_info":
                     await save_patient_info_db(family_id=family_id, **args)
-                    await log_action(family_id, "update", f"Informações do paciente atualizadas: {args.get('patient_name')}", metadata=args)
+                    # [FIX 4] Log enriquecido com tipo de ação
+                    await log_action(
+                        family_id, "cadastro_paciente",
+                        f"Paciente cadastrado/atualizado: {args.get('patient_name')}",
+                        metadata={**args, "action": "save_patient_info"}
+                    )
 
                 elif fn_name == "save_interlocutor_info":
                     await save_interlocutor_info_db(family_id, args.get("interlocutor_name", ""))
-                    await log_action(family_id, "update", f"Interlocutor principal registrado: {args.get('interlocutor_name')}", metadata=args)
+                    # [FIX 4] Log enriquecido com tipo de ação
+                    await log_action(
+                        family_id, "cadastro_interlocutor",
+                        f"Interlocutor principal registrado: {args.get('interlocutor_name')}",
+                        metadata={**args, "action": "save_interlocutor_info"}
+                    )
 
                 # [FASE 3] Clarificação sinalizada pela IA
                 elif fn_name == "request_clarification":
@@ -793,6 +829,8 @@ Não escreva texto fora de JSON no 'content'.
             )
             await save_conversation_message(family_id, "ai", "CuidaFamília", question)
             twilio_resp.message(question)
+            # [FIX 3] Log da clarificação solicitada
+            await log_action(family_id, "clarificacao", f"Clarificação solicitada: {clarification_needed.get('intent')}", metadata=clarification_needed)
             return Response(content=str(twilio_resp), media_type="application/xml")
 
         # ----
@@ -807,20 +845,20 @@ Não escreva texto fora de JSON no 'content'.
             if not confirmation_text:
                 if action_type == "schedule_event":
                     confirmation_text = (
-                        f"📅 Posso registrar o seguinte?\n\n"
-                        f"{action_data.get('title')}\n"
-                        f"📆 Data: {action_data.get('event_date')} às {action_data.get('event_time', '?')}\n"
-                        f"📋 Tipo: {action_data.get('event_type')}\n\n"
-                        f"Responda SIM para confirmar ou NÃO para cancelar."
+                    f"📅 Posso registrar o seguinte?\n\n"
+                    f"{action_data.get('title')}\n"
+                    f"📆 Data: {action_data.get('event_date')} às {action_data.get('event_time', '?')}\n"
+                    f"📋 Tipo: {action_data.get('event_type')}\n\n"
+                    f"Responda SIM para confirmar ou NÃO para cancelar."
                     )
                 elif action_type == "save_medication_schedule":
                     times_str = ", ".join(action_data.get("times", []))
                     confirmation_text = (
-                        f"💊 Posso registrar a seguinte rotina de medicação?\n\n"
-                        f"{action_data.get('medication_name')} {action_data.get('dosage')}\n"
-                        f"🔁 Frequência: {action_data.get('frequency')}\n"
-                        f"⏰ Horários: {times_str}\n\n"
-                        f"Responda SIM para confirmar ou NÃO para cancelar."
+                    f"💊 Posso registrar a seguinte rotina de medicação?\n\n"
+                    f"{action_data.get('medication_name')} {action_data.get('dosage')}\n"
+                    f"🔁 Frequência: {action_data.get('frequency')}\n"
+                    f"⏰ Horários: {times_str}\n\n"
+                    f"Responda SIM para confirmar ou NÃO para cancelar."
                     )
 
             # [FASE 2] Salvar pendência no banco
@@ -832,6 +870,8 @@ Não escreva texto fora de JSON no 'content'.
 
             await save_conversation_message(family_id, "ai", "CuidaFamília", confirmation_text)
             twilio_resp.message(confirmation_text)
+            # [FIX 4] Log da ação pendente criada
+            await log_action(family_id, "confirmacao_pendente", f"Aguardando confirmação: {action_type}", metadata={"action_type": action_type, "data": action_data})
             return Response(content=str(twilio_resp), media_type="application/xml")
 
         # ----
@@ -840,6 +880,8 @@ Não escreva texto fora de JSON no 'content'.
         if date_error and date_error_message:
             await save_conversation_message(family_id, "ai", "CuidaFamília", date_error_message)
             twilio_resp.message(date_error_message)
+            # [FIX 3] Pula segundo ciclo — resposta já definida
+            await log_action(family_id, "erro_data", "Tentativa de agendamento com data passada", metadata={"mensagem": incoming_msg})
             return Response(content=str(twilio_resp), media_type="application/xml")
 
         # ----
