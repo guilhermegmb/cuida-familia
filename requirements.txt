@@ -5,3 +5,5 @@ twilio
 supabase
 httpx
 python-dotenv
+requests
+pytz
