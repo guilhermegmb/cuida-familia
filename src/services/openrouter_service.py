@@ -27,7 +27,7 @@ class OpenRouterService:
         tools: list[dict[str, Any]] | None = None,
         temperature: float = 0.2,
     ) -> dict[str, Any]:
-        api_key = self._ensure_ascii_header(self.settings.openrouter_api_key, "Authorization")
+        api_key = self.settings.openrouter_api_key.strip()
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",

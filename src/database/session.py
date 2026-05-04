@@ -14,13 +14,19 @@ settings = get_settings()
 
 database_url = settings.database_url or "postgresql+asyncpg://postgres:postgres@localhost:5432/postgres"
 
-engine = create_async_engine(
-    database_url,
-    echo=False,
-    pool_pre_ping=True,
-    future=True,
-    connect_args={"ssl": "require"}
-)
+engine_kwargs = {
+    "echo": False,
+    "pool_pre_ping": True,
+    "future": True,
+}
+
+if database_url.startswith("postgresql+asyncpg"):
+    engine_kwargs["connect_args"] = {
+        "statement_cache_size": 0,  # Fix para Supabase pgbouncer (pool_mode=transaction)
+        "server_settings": {"jit": "off"},
+    }
+
+engine = create_async_engine(database_url, **engine_kwargs)
 
 SessionFactory = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
 
