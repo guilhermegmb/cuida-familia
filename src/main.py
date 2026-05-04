@@ -47,4 +47,8 @@ app = FastAPI(
 )
 
 app.include_router(health_router)
+@router.get("/health")
+async def health():
+    return {"status": "ok"}
+
 app.include_router(webhook_router)

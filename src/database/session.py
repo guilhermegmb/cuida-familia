@@ -18,11 +18,13 @@ engine_kwargs = {
     "echo": False,
     "pool_pre_ping": True,
     "future": True,
+    "executemany_mode": "values_only",
+    "prepared_statement_cache_size": 0,
 }
 
 if database_url.startswith("postgresql+asyncpg"):
     engine_kwargs["connect_args"] = {
-        "statement_cache_size": 0,  # Fix para Supabase pgbouncer (pool_mode=transaction)
+        "statement_cache_size": 0,  # asyncpg cache OFF
         "server_settings": {"jit": "off"},
     }
 
