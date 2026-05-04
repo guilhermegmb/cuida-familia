@@ -14,17 +14,17 @@ settings = get_settings()
 
 database_url = settings.database_url or "postgresql+asyncpg://postgres:postgres@localhost:5432/postgres"
 
+# Configurações do engine
 engine_kwargs = {
     "echo": False,
     "pool_pre_ping": True,
     "future": True,
-    "executemany_mode": "values_only",
-    "prepared_statement_cache_size": 0,
 }
 
+# Configurações específicas para asyncpg + PgBouncer (Supabase)
 if database_url.startswith("postgresql+asyncpg"):
     engine_kwargs["connect_args"] = {
-        "statement_cache_size": 0,  # asyncpg cache OFF
+        "statement_cache_size": 0,  # evita DuplicatePreparedStatementError
         "server_settings": {"jit": "off"},
     }
 
@@ -43,9 +43,14 @@ async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
 
 
 async def init_db() -> None:
-    # Importa os modelos para registrar os mapeamentos no SQLAlchemy
+    """
+    Em produção (Render + Supabase), NÃO executar create_all().
+    O Supabase usa PgBouncer em modo transaction, que não suporta introspecção
+    e quebra com prepared statements internos do SQLAlchemy.
+    """
     from src.models import entities  # noqa: F401
 
-    async with engine.begin() as conn:
-        # O schema já existe no Supabase; create_all mantém compatível em ambiente local/dev.
-        await conn.run_sync(Base.metadata.create_all)
+    # Só cria tabelas em ambiente local
+    if settings.app_env.lower() == "development":
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
