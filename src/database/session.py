@@ -19,6 +19,7 @@ engine = create_async_engine(
     echo=False,
     pool_pre_ping=True,
     future=True,
+    connect_args={"ssl": "require"}
 )
 
 SessionFactory = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
