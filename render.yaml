@@ -11,8 +11,6 @@ services:
     envVars:
       - key: NODE_VERSION
         value: "20"
-      - key: PORT
-        value: "3000"
       - key: TWILIO_ACCOUNT_SID
         sync: false
       - key: TWILIO_AUTH_TOKEN
