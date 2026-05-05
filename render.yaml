@@ -1,32 +1,33 @@
 services:
   - type: web
-    name: cuida-familia-backend
-    env: docker
+    name: cuidafamilia-backend
+    runtime: node
+    region: oregon
     plan: free
-    autoDeploy: true
-
+    rootDir: nodejs_space
+    buildCommand: yarn install && yarn build
+    startCommand: yarn start:prod
+    healthCheckPath: /health
     envVars:
-      - key: DATABASE_URL
+      - key: NODE_VERSION
+        value: "20"
+      - key: PORT
+        value: "3000"
+      - key: TWILIO_ACCOUNT_SID
+        sync: false
+      - key: TWILIO_AUTH_TOKEN
+        sync: false
+      - key: TWILIO_WHATSAPP_NUMBER
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_KEY
         sync: false
       - key: OPENROUTER_API_KEY
         sync: false
       - key: OPENROUTER_MODEL
         value: openai/gpt-4o-mini
-      - key: OPENROUTER_BASE_URL
-        value: https://openrouter.ai/api/v1
-      - key: TWILIO_ACCOUNT_SID
-        sync: false
-      - key: TWILIO_AUTH_TOKEN
-        sync: false
-      - key: TWILIO_PHONE_NUMBER
-        sync: false
-      - key: CHECKIN_CRON
-        value: "0 9 * * *"
-      - key: REMINDERS_CRON
-        value: "*/5 * * * *"
-      - key: LOG_LEVEL
-        value: INFO
-      - key: APP_ENV
-        value: production
-
-    healthCheckPath: /health
+      - key: DEFAULT_TIMEZONE
+        value: America/Sao_Paulo
+      - key: VALIDATE_TWILIO_SIGNATURE
+        value: "false"
