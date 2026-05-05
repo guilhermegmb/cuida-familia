@@ -1,4 +1,5 @@
 import httpx
+import json
 from src.core.config import get_settings
 from src.core.prompts import PROMPT_SISTEMA, PROMPT_FALLBACK_LLM
 from src.utils.logger import get_logger, log_erro
@@ -16,17 +17,14 @@ async def chamar_llm(
 ) -> tuple[str, int]:
     """
     Envia mensagem ao LLM via OpenRouter.
-
     Retorna: (resposta_texto, tokens_usados)
     """
     settings = get_settings()
 
-    # Monta sistema com contexto extra se houver
     sistema = PROMPT_SISTEMA
     if contexto_extra:
         sistema += f"\n\n## Contexto atual do cuidador\n{contexto_extra}"
 
-    # Monta histórico de mensagens
     mensagens = [{"role": "system", "content": sistema}]
 
     if historico:
@@ -38,9 +36,9 @@ async def chamar_llm(
 
     headers = {
         "Authorization": f"Bearer {settings.openrouter_api_key}",
-        "Content-Type": "application/json",
+        "Content-Type": "application/json; charset=utf-8",
         "HTTP-Referer": "https://cuidafamilia.app",
-        "X-Title": "CuidaFamília",
+        "X-Title": "CuidaFamilia",
     }
 
     payload = {
@@ -50,9 +48,12 @@ async def chamar_llm(
         "temperature": 0.7,
     }
 
+    # Serializa com ensure_ascii=False para preservar acentos e caracteres especiais
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
     try:
         async with httpx.AsyncClient(timeout=TIMEOUT_SEGUNDOS) as client:
-            response = await client.post(OPENROUTER_URL, json=payload, headers=headers)
+            response = await client.post(OPENROUTER_URL, content=body, headers=headers)
             response.raise_for_status()
             data = response.json()
 
