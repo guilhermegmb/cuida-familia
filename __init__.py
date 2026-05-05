@@ -1,1 +1,0 @@
-"""Backend do Agente CuidaFamília."""
