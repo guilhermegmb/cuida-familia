@@ -5,12 +5,12 @@ services:
     region: oregon
     plan: free
     rootDir: nodejs_space
-    buildCommand: yarn install && yarn build
-    startCommand: yarn start:prod
+    buildCommand: corepack enable && yarn install && yarn build
+    startCommand: corepack enable && yarn start:prod
     healthCheckPath: /health
     envVars:
       - key: NODE_VERSION
-        value: "20.20.2"
+        value: "20"
       - key: TWILIO_ACCOUNT_SID
         sync: false
       - key: TWILIO_AUTH_TOKEN
