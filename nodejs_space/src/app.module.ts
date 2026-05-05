@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
+import { AppController } from './app.controller';
 import { HealthController } from './health/health.controller';
 import { WebhookController } from './webhook/webhook.controller';
 import { SupabaseService } from './common/supabase.service';
@@ -9,7 +10,7 @@ import { AgentService } from './agent/agent.service';
 
 @Module({
   imports: [ConfigModule.forRoot({ isGlobal: true })],
-  controllers: [HealthController, WebhookController],
+  controllers: [AppController, HealthController, WebhookController],
   providers: [SupabaseService, OpenRouterService, TwilioService, AgentService],
 })
 export class AppModule {}

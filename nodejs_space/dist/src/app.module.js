@@ -9,6 +9,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.AppModule = void 0;
 const common_1 = require("@nestjs/common");
 const config_1 = require("@nestjs/config");
+const app_controller_1 = require("./app.controller");
 const health_controller_1 = require("./health/health.controller");
 const webhook_controller_1 = require("./webhook/webhook.controller");
 const supabase_service_1 = require("./common/supabase.service");
@@ -21,7 +22,7 @@ exports.AppModule = AppModule;
 exports.AppModule = AppModule = __decorate([
     (0, common_1.Module)({
         imports: [config_1.ConfigModule.forRoot({ isGlobal: true })],
-        controllers: [health_controller_1.HealthController, webhook_controller_1.WebhookController],
+        controllers: [app_controller_1.AppController, health_controller_1.HealthController, webhook_controller_1.WebhookController],
         providers: [supabase_service_1.SupabaseService, openrouter_service_1.OpenRouterService, twilio_service_1.TwilioService, agent_service_1.AgentService],
     })
 ], AppModule);

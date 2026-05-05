@@ -32,7 +32,8 @@ async function bootstrap() {
     customCss: `.swagger-ui .topbar { display: none } .swagger-ui .info .title small { display:none } body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }`,
   });
 
-  await app.listen(3000, '0.0.0.0');
-  logger.info('CuidaFamília backend listening on port 3000');
+  const port = parseInt(process.env.PORT || '3000', 10);
+  await app.listen(port, '0.0.0.0');
+  logger.info(`CuidaFamília backend listening on port ${port}`);
 }
 bootstrap();
