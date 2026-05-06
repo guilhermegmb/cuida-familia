@@ -21,7 +21,7 @@ app = FastAPI(
 app.include_router(webhook_router)
 
 
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])
 async def health_check():
     return JSONResponse({
         "status": "ok",
