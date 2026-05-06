@@ -101,7 +101,7 @@ def salvar_interacao(cuidador_id: str, papel: str, mensagem: str, tokens: int = 
         return {}
 
 
-def buscar_historico(cuidador_id: str, limite: int = 10) -> list[dict]:
+def buscar_historico(cuidador_id: str, limite: int = 20) -> list[dict]:
     """Retorna as últimas N interações para contexto do LLM."""
     try:
         sb = get_supabase()
@@ -133,8 +133,33 @@ def salvar_memoria(cuidador_id: str, chave: str, valor: str):
         log_erro("salvar_memoria", {"erro": str(e), "chave": chave}, cuidador_id)
 
 
+def salvar_memorias_lote(cuidador_id: str, memorias: dict):
+    """
+    Salva múltiplos itens de memória de uma vez (upsert em lote).
+    Mais eficiente do que salvar_memoria() em loop.
+    memorias: {"chave": "valor", ...}
+    """
+    if not memorias:
+        return
+    try:
+        sb = get_supabase()
+        registros = [
+            {"cuidador_id": cuidador_id, "chave": k, "valor": v}
+            for k, v in memorias.items()
+            if v  # ignora valores vazios/None
+        ]
+        if registros:
+            sb.table("memoria_agente").upsert(
+                registros,
+                on_conflict="cuidador_id,chave"
+            ).execute()
+            logger.info(f"Memórias salvas em lote: {list(memorias.keys())} → {cuidador_id[:8]}...")
+    except Exception as e:
+        log_erro("salvar_memorias_lote", {"erro": str(e), "chaves": list(memorias.keys())}, cuidador_id)
+
+
 def buscar_memoria(cuidador_id: str) -> dict:
-    """Retorna toda a memória do agente para um cuidador."""
+    """Retorna TODA a memória do agente para um cuidador (sem filtro de chaves)."""
     try:
         sb = get_supabase()
         resultado = sb.table("memoria_agente") \
