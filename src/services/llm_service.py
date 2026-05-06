@@ -1,3 +1,12 @@
+"""
+CuidaFamília — Serviço LLM via OpenRouter
+
+Três responsabilidades:
+  1. chamar_llm()          → conversa principal com suporte a tools
+  2. processar_tool_calls() → interpreta decisões de tool do LLM
+  3. extrair_entidades()    → extração silenciosa de entidades (background)
+"""
+
 import httpx
 import json
 from src.core.config import get_settings
@@ -7,18 +16,36 @@ from src.utils.logger import get_logger, log_erro
 logger = get_logger("llm")
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-TIMEOUT_SEGUNDOS = 30
-TIMEOUT_EXTRACAO = 15  # Extração é rápida, timeout menor
+TIMEOUT_PRINCIPAL = 30
+TIMEOUT_EXTRACAO = 15
+
+
+def _montar_headers(settings) -> dict:
+    return {
+        "Authorization": f"Bearer {settings.openrouter_api_key}",
+        "Content-Type": "application/json; charset=utf-8",
+        "HTTP-Referer": "https://cuidafamilia.app",
+        "X-Title": "CuidaFamilia",
+    }
+
+
+def _serializar(payload: dict) -> bytes:
+    """Serializa garantindo UTF-8 correto para português."""
+    return json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
 
 async def chamar_llm(
     mensagem_usuario: str,
     historico: list[dict] = None,
     contexto_extra: str = "",
-) -> tuple[str, int]:
+    tools: list[dict] = None,
+) -> tuple[str, int, list[dict]]:
     """
-    Envia mensagem ao LLM via OpenRouter.
-    Retorna: (resposta_texto, tokens_usados)
+    Chamada principal ao LLM com suporte opcional a tools.
+
+    Retorna: (resposta_texto, tokens_usados, tool_calls)
+    - tool_calls é lista vazia se o LLM não decidiu usar nenhuma tool
+    - resposta_texto pode ser vazia se o LLM optou por usar só tools
     """
     settings = get_settings()
 
@@ -27,156 +54,179 @@ async def chamar_llm(
         sistema += f"\n\n## Contexto atual do cuidador\n{contexto_extra}"
 
     mensagens = [{"role": "system", "content": sistema}]
-
     if historico:
         for item in historico:
             role = "user" if item["papel"] == "user" else "assistant"
             mensagens.append({"role": role, "content": item["mensagem"]})
-
     mensagens.append({"role": "user", "content": mensagem_usuario})
 
-    headers = {
-        "Authorization": f"Bearer {settings.openrouter_api_key}",
-        "Content-Type": "application/json; charset=utf-8",
-        "HTTP-Referer": "https://cuidafamilia.app",
-        "X-Title": "CuidaFamilia",
+    payload: dict = {
+        "model": settings.openrouter_model,
+        "messages": mensagens,
+        "max_tokens": 600,
+        "temperature": 0.7,
     }
+    if tools:
+        payload["tools"] = tools
+        payload["tool_choice"] = "auto"
+
+    try:
+        async with httpx.AsyncClient(timeout=TIMEOUT_PRINCIPAL) as client:
+            response = await client.post(
+                OPENROUTER_URL,
+                content=_serializar(payload),
+                headers=_montar_headers(settings),
+            )
+            response.raise_for_status()
+            data = response.json()
+
+        choice = data["choices"][0]
+        message = choice["message"]
+        tokens = data.get("usage", {}).get("total_tokens", 0)
+
+        # Extrai tool_calls se o LLM decidiu usar alguma tool
+        tool_calls = message.get("tool_calls") or []
+        texto = (message.get("content") or "").strip()
+
+        if tool_calls:
+            logger.info(f"LLM decidiu usar tools: {[tc['function']['name'] for tc in tool_calls]}")
+        else:
+            logger.info(f"LLM respondeu em texto — tokens: {tokens}")
+
+        return texto, tokens, tool_calls
+
+    except httpx.TimeoutException:
+        log_erro("llm_timeout", {"model": settings.openrouter_model})
+        return PROMPT_FALLBACK_LLM, 0, []
+    except httpx.HTTPStatusError as e:
+        log_erro("llm_http_error", {"status": e.response.status_code, "body": e.response.text[:200]})
+        return PROMPT_FALLBACK_LLM, 0, []
+    except Exception as e:
+        log_erro("llm_erro_generico", {"erro": str(e)})
+        return PROMPT_FALLBACK_LLM, 0, []
+
+
+async def chamar_llm_com_resultado_tool(
+    mensagens_originais: list[dict],
+    tool_call_id: str,
+    nome_tool: str,
+    resultado_tool: str,
+    tools: list[dict] = None,
+) -> tuple[str, int]:
+    """
+    Segunda chamada ao LLM após execução de uma tool.
+    Injeta o resultado da tool para o LLM gerar a resposta final ao usuário.
+
+    Retorna: (resposta_texto, tokens_usados)
+    """
+    settings = get_settings()
+
+    # Adiciona o resultado da tool no histórico de mensagens
+    mensagens = list(mensagens_originais) + [
+        {
+            "role": "tool",
+            "tool_call_id": tool_call_id,
+            "content": resultado_tool,
+        }
+    ]
 
     payload = {
         "model": settings.openrouter_model,
         "messages": mensagens,
-        "max_tokens": 500,
+        "max_tokens": 400,
         "temperature": 0.7,
     }
-
-    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    if tools:
+        payload["tools"] = tools
+        payload["tool_choice"] = "none"  # Não permitir mais tool_calls nesta rodada
 
     try:
-        async with httpx.AsyncClient(timeout=TIMEOUT_SEGUNDOS) as client:
-            response = await client.post(OPENROUTER_URL, content=body, headers=headers)
+        async with httpx.AsyncClient(timeout=TIMEOUT_PRINCIPAL) as client:
+            response = await client.post(
+                OPENROUTER_URL,
+                content=_serializar(payload),
+                headers=_montar_headers(settings),
+            )
             response.raise_for_status()
             data = response.json()
 
-            texto = data["choices"][0]["message"]["content"].strip()
-            tokens = data.get("usage", {}).get("total_tokens", 0)
+        message = data["choices"][0]["message"]
+        tokens = data.get("usage", {}).get("total_tokens", 0)
+        texto = (message.get("content") or "").strip()
 
-            logger.info(f"LLM respondeu — tokens: {tokens}")
-            return texto, tokens
-
-    except httpx.TimeoutException:
-        log_erro("llm_timeout", {"model": settings.openrouter_model})
-        return PROMPT_FALLBACK_LLM, 0
-
-    except httpx.HTTPStatusError as e:
-        log_erro("llm_http_error", {"status": e.response.status_code, "body": e.response.text[:200]})
-        return PROMPT_FALLBACK_LLM, 0
+        logger.info(f"LLM pós-tool respondeu — tokens: {tokens}")
+        return texto, tokens
 
     except Exception as e:
-        log_erro("llm_erro_generico", {"erro": str(e)})
+        log_erro("llm_pos_tool_falhou", {"erro": str(e)})
         return PROMPT_FALLBACK_LLM, 0
 
 
 async def extrair_entidades(mensagem: str, contexto_atual: dict) -> dict:
     """
-    Chamada silenciosa e secundária ao LLM para extrair entidades
-    estruturadas da mensagem do usuário.
-
-    Retorna dict com chaves prontas para salvar na memoria_agente.
-    Nunca lança exceção — falha silenciosa para não impactar a conversa.
-
-    Entidades extraídas:
-    - medicamentos        → lista de remédios mencionados
-    - condicoes_saude     → condições/diagnósticos mencionados
-    - ultima_consulta     → data de consulta mencionada
-    - proximo_compromisso → próximo agendamento mencionado
-    - alergias            → alergias mencionadas
-    - medico_responsavel  → nome do médico mencionado
+    Chamada silenciosa para extrair entidades estruturadas da mensagem.
+    Temperature=0 para máximo determinismo.
+    Nunca lança exceção.
     """
     settings = get_settings()
 
-    # Monta contexto resumido para guiar a extração
     contexto_str = ""
-    if contexto_atual:
-        partes = []
-        if contexto_atual.get("pessoa_cuidada"):
-            partes.append(f"Pessoa cuidada: {contexto_atual['pessoa_cuidada']}")
-        if contexto_atual.get("medicamentos"):
-            partes.append(f"Medicamentos já conhecidos: {contexto_atual['medicamentos']}")
+    partes = []
+    if contexto_atual.get("pessoa_cuidada"):
+        partes.append(f"Pessoa cuidada: {contexto_atual['pessoa_cuidada']}")
+    if contexto_atual.get("medicamentos"):
+        partes.append(f"Medicamentos já conhecidos: {contexto_atual['medicamentos']}")
+    if partes:
         contexto_str = "\n".join(partes)
 
-    prompt_sistema = """Você é um extrator silencioso de informações de saúde.
-Analise a mensagem do cuidador e extraia SOMENTE informações factuais mencionadas explicitamente.
+    prompt_sistema = """Você é um extrator de informações de saúde.
+Analise a mensagem do cuidador e extraia informações factuais mencionadas explicitamente.
+Retorne APENAS JSON válido, sem markdown, sem texto adicional.
 
-Retorne APENAS um JSON válido, sem nenhum texto antes ou depois, sem markdown, sem explicações.
-Se não houver informação relevante para uma chave, retorne null para ela.
-
-Formato obrigatório:
+Formato:
 {
-  "medicamentos": "lista separada por vírgula ou null",
-  "condicoes_saude": "lista separada por vírgula ou null",
-  "ultima_consulta": "data ou descrição ou null",
-  "proximo_compromisso": "data/hora ou descrição ou null",
-  "alergias": "lista separada por vírgula ou null",
+  "medicamentos": "lista com dosagens ou null",
+  "condicoes_saude": "diagnósticos/condições ou null",
+  "ultima_consulta": "data ou null",
+  "proximo_compromisso": "data/hora ou null",
+  "alergias": "lista ou null",
   "medico_responsavel": "nome do médico ou null"
 }
 
-Regras:
-- Para medicamentos: inclua nome + dosagem se informada (ex: "Atenolol 25mg, Losartana 50mg")
-- Se a mensagem atualizar medicamentos já conhecidos, retorne a lista COMPLETA atualizada
-- Não invente informações que não estejam na mensagem
-- Não faça diagnósticos ou interpretações clínicas"""
+Regras: não invente, não interprete clinicamente, apenas extraia o que está explícito."""
 
     mensagens = [
         {"role": "system", "content": prompt_sistema},
-        {"role": "user", "content": f"Contexto:\n{contexto_str}\n\nMensagem do cuidador:\n{mensagem}"}
+        {"role": "user", "content": f"Contexto:\n{contexto_str}\n\nMensagem:\n{mensagem}"},
     ]
-
-    headers = {
-        "Authorization": f"Bearer {settings.openrouter_api_key}",
-        "Content-Type": "application/json; charset=utf-8",
-        "HTTP-Referer": "https://cuidafamilia.app",
-        "X-Title": "CuidaFamilia",
-    }
 
     payload = {
         "model": settings.openrouter_model,
         "messages": mensagens,
         "max_tokens": 200,
-        "temperature": 0.0,  # Zero: queremos extração determinística
+        "temperature": 0.0,
     }
-
-    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
     try:
         async with httpx.AsyncClient(timeout=TIMEOUT_EXTRACAO) as client:
-            response = await client.post(OPENROUTER_URL, content=body, headers=headers)
+            response = await client.post(
+                OPENROUTER_URL,
+                content=_serializar(payload),
+                headers=_montar_headers(settings),
+            )
             response.raise_for_status()
             data = response.json()
 
-            texto = data["choices"][0]["message"]["content"].strip()
+        texto = data["choices"][0]["message"]["content"].strip()
+        texto = texto.replace("```json", "").replace("```", "").strip()
+        entidades = json.loads(texto)
 
-            # Remove possíveis marcadores de código que o LLM possa ter adicionado
-            texto = texto.replace("```json", "").replace("```", "").strip()
-
-            entidades = json.loads(texto)
-
-            # Filtra apenas valores não-nulos e converte para string
-            resultado = {
-                k: str(v)
-                for k, v in entidades.items()
-                if v is not None and str(v).strip() not in ("", "null", "None")
-            }
-
-            if resultado:
-                logger.info(f"Entidades extraídas: {list(resultado.keys())}")
-
-            return resultado
-
-    except json.JSONDecodeError as e:
-        log_erro("extracao_json_invalido", {"erro": str(e), "texto": texto[:100] if 'texto' in dir() else "N/A"})
-        return {}
+        return {
+            k: str(v)
+            for k, v in entidades.items()
+            if v is not None and str(v).strip() not in ("", "null", "None")
+        }
 
     except Exception as e:
-        # Falha silenciosa — extração nunca deve derrubar a conversa principal
         log_erro("extracao_entidades_falhou", {"erro": str(e)})
         return {}
