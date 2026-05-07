@@ -120,6 +120,7 @@ async def _fluxo_conversa(cuidador: dict, mensagem: str) -> str:
     historico = db.buscar_historico(cuidador_id, limite=20)
     memoria = db.buscar_memoria(cuidador_id)
     contexto_extra = _formatar_contexto_completo(memoria, cuidador)
+    contexto_extra = _adicionar_plano_ao_contexto(contexto_extra, cuidador_id)
 
     # ── Chamada 1: LLM com tools disponíveis ──
     texto, tokens, tool_calls = await llm_service.chamar_llm(
@@ -301,3 +302,20 @@ def _formatar_contexto_completo(memoria: dict, cuidador: dict) -> str:
         )
 
     return "\n\n".join(secoes) if secoes else ""
+
+
+# ── Injeção do Plano de Cuidado no contexto (Semana 3) ───────────────────────
+# Patch aplicado ao _formatar_contexto_completo existente
+# O import é feito aqui para evitar import circular
+def _adicionar_plano_ao_contexto(contexto_base: str, cuidador_id: str) -> str:
+    """Adiciona o plano de cuidado ao contexto se existir."""
+    try:
+        from src.services import plan_service
+        plano = plan_service.buscar_plano_ativo(cuidador_id)
+        if not plano:
+            return contexto_base
+        rotinas = plan_service.buscar_rotinas_ativas(cuidador_id)
+        plano_str = plan_service.formatar_plano_para_llm(plano, rotinas)
+        return f"{contexto_base}\n\n{plano_str}" if contexto_base else plano_str
+    except Exception:
+        return contexto_base
